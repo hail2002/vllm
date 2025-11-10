@@ -394,11 +394,31 @@ class OpenAIServingResponses(OpenAIServing):
                     if sampling_params.structured_outputs is None:
                         sampling_params.structured_outputs = StructuredOutputsParams()
                     struct_out = sampling_params.structured_outputs
+
+                    # Если еще не установлена грамматика, создаем ее.
                     if struct_out.all_non_structural_tag_constraints_none():
+                        # 1. Извлекаем кастомные инструменты из запроса
+                        custom_tools = [
+                            tool for tool in request.tools if tool.type == "function"
+                        ] if request.tools else None
+
+                        # 2. Извлекаем схему для финального ответа
+                        final_response_schema = None
+                        if (
+                            request.text is not None and
+                            request.text.format is not None and
+                            request.text.format.type == "json_schema" and
+                            request.text.format.schema_ is not None
+                        ):
+                            final_response_schema = request.text.format.schema_
+
+                        # 3. Передаем все в prepare_structured_tag
                         sampling_params.structured_outputs.structural_tag = (
                             reasoning_parser.prepare_structured_tag(
                                 sampling_params.structured_outputs.structural_tag,
                                 self.tool_server,
+                                custom_tools=custom_tools,
+                                final_response_schema=final_response_schema,
                             )
                         )
                 generator = self._generate_with_builtin_tools(

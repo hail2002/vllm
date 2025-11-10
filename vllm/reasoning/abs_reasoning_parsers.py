@@ -121,6 +121,7 @@ class ReasoningParser:
         self,
         original_tag: str | None,
         tool_server: ToolServer | None,
+        request: ChatCompletionRequest | ResponsesRequest | None = None,
     ) -> str:
         """
         Instance method that is implemented for preparing the structured tag

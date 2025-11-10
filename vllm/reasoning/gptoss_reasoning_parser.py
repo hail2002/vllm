@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+from typing import Any
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ResponsesRequest, ChatCompletionToolsParam
 from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
@@ -55,6 +57,55 @@ def tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list: list[str]) 
     for tool in builtin_tool_list:
         new_tag["format"]["tags"].extend(from_builtin_tool_to_tag(tool))
     return new_tag
+
+
+def from_custom_tool_to_tag(tool: ChatCompletionToolsParam) -> dict | None:
+    """Создает правило грамматики для одного кастомного инструмента."""
+    if tool.type != "function":
+        return None
+
+    return {
+        "begin": f"<|channel|>commentary to=functions.{tool.function.name}",
+        "schema": tool.function.parameters,
+        "end": "<|call|>"
+    }
+
+
+def tag_with_custom_tools(grammar: dict, custom_tools: list[ChatCompletionToolsParam]) -> dict:
+    """Расширяет грамматику правилами для кастомных инструментов."""
+    import copy
+    new_grammar = copy.deepcopy(grammar)
+
+    if not custom_tools:
+        return new_grammar
+
+    if "<|channel|>commentary to=" not in new_grammar["format"]["triggers"]:
+        new_grammar["format"]["triggers"].append("<|channel|>commentary to=")
+
+    for tool in custom_tools:
+        tool_rule = from_custom_tool_to_tag(tool)
+        if tool_rule:
+            new_grammar["format"]["tags"].append(tool_rule)
+
+    return new_grammar
+
+
+def tag_with_final_response_schema(grammar: dict, schema: dict[str, Any]) -> dict:
+    """Расширяет грамматику правилом для структурированного финального ответа."""
+    import copy
+    new_grammar = copy.deepcopy(grammar)
+
+    final_tag_rule = {
+        "begin": "<|channel|>final<|message|>",
+        "schema": schema,
+        "end": "<|return|>"
+    }
+    new_grammar["format"]["tags"].append(final_tag_rule)
+
+    if "<|channel|>final" not in new_grammar["format"]["triggers"]:
+        new_grammar["format"]["triggers"].append("<|channel|>final")
+
+    return new_grammar
 
 
 class GptOssReasoningParser(ReasoningParser):
@@ -144,30 +195,68 @@ class GptOssReasoningParser(ReasoningParser):
 
     # This function prepares the structural tag to format reasoning output
     def prepare_structured_tag(
-        self, original_tag: str | None, tool_server: ToolServer | None
+            self,
+            original_tag: str | None,
+            tool_server: ToolServer | None,
+            request: ChatCompletionRequest | ResponsesRequest | None = None,
     ) -> str:
-        if original_tag is None:
-            if tool_server is None:
-                return json.dumps(no_func_reaonsing_tag)
-            else:
-                builtin_tool_list: list[str] = []
-                if tool_server.has_tool("browser"):
-                    builtin_tool_list.append("browser")
-                if tool_server.has_tool("python"):
-                    builtin_tool_list.append("python")
-                if tool_server.has_tool("container"):
-                    builtin_tool_list.append("container")
-
-                if len(builtin_tool_list) > 0:
-                    logger.info("Builtin_tool_list: %s", builtin_tool_list)
-                    func_tag = json.dumps(
-                        tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list)
-                    )
-                else:
-                    logger.info("Builtin_tool_list is empty")
-                    func_tag = json.dumps(no_func_reaonsing_tag)
-
-                return func_tag
-        else:
-            # There is potential risk for appending the tag to the original tag
+        """
+                Создает грамматику `structural_tag` для управления выводом модели gpt-oss.
+                Эта грамматика динамически строится на основе:
+                1. Наличия встроенных инструментов (browser, python).
+                2. Кастомных инструментов, переданных в запросе.
+                3. JSON-схемы для финального ответа, переданной в запросе.
+                """
+        if original_tag is not None:
             return original_tag
+
+        custom_tools: list[ChatCompletionToolsParam] | None = None
+        final_response_schema: dict[str, Any] | None = None
+
+        if request:
+            # 1. Извлекаем кастомные инструменты (поле 'tools' есть в обоих типах)
+            if request.tools:
+                # Фильтруем, чтобы оставить только 'function' инструменты,
+                # так как gpt-oss понимает только их в этом контексте.
+                # Также проверяем наличие атрибутов для безопасности.
+                custom_tools = [
+                    tool for tool in request.tools
+                    if (hasattr(tool, 'type') and tool.type == "function" and
+                        hasattr(tool, 'function') and hasattr(tool.function, 'name'))
+                ]
+
+            # 2. Извлекаем схему для финального ответа (только для ResponsesRequest)
+            # Проверяем, что это объект ResponsesRequest и нужные поля существуют.
+            if isinstance(request, ResponsesRequest) and hasattr(request, 'text') and request.text:
+                if (
+                        request.text.format is not None and
+                        request.text.format.type == "json_schema" and
+                        hasattr(request.text.format, 'schema_') and
+                        request.text.format.schema_ is not None
+                ):
+                    final_response_schema = request.text.format.schema_
+
+        import copy
+        # Начинаем с базовой грамматики, которая разрешает только 'analysis'
+        current_grammar = copy.deepcopy(no_func_reaonsing_tag)
+
+        # 3. Добавляем встроенные инструменты, если они есть и активны
+        if tool_server is not None:
+            builtin_tool_list: list[str] = [
+                tool for tool in ["browser", "python", "container"] if tool_server.has_tool(tool)
+            ]
+            if builtin_tool_list:
+                logger.info("Adding builtin tools to grammar: %s", builtin_tool_list)
+                current_grammar = tag_with_builtin_funcs(current_grammar, builtin_tool_list)
+
+        # 4. Добавляем кастомные инструменты, если они были извлечены из запроса
+        if custom_tools:
+            logger.info("Adding %d custom tools to grammar.", len(custom_tools))
+            current_grammar = tag_with_custom_tools(current_grammar, custom_tools)
+
+        # 5. Добавляем схему для финального ответа, если она была извлечена
+        if final_response_schema:
+            logger.info("Adding final response schema to grammar.")
+            current_grammar = tag_with_final_response_schema(current_grammar, final_response_schema)
+
+        return json.dumps(current_grammar)
