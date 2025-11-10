@@ -144,35 +144,56 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
 def get_developer_message(
     instructions: str | None = None,
     tools: list[Tool | ChatCompletionToolsParam] | None = None,
+    response_schema: dict | None = None,
 ) -> Message:
     dev_msg_content = DeveloperContent.new()
+    parts = []
+
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
-        dev_msg_content = dev_msg_content.with_instructions(instructions)
+        parts.append("# Instructions")
+        parts.append(instructions)
+
     if tools is not None:
         function_tools: list[Tool | ChatCompletionToolsParam] = []
         for tool in tools:
-            if tool.type in (
-                "web_search_preview",
-                "code_interpreter",
-                "container",
-                "mcp",
-            ):
-                # These are built-in tools that are added to the system message.
-                # Adding in MCP for now until we support MCP tools executed
-                # server side
-                pass
-
-            elif tool.type == "function":
+            if tool.type == "function":
                 function_tools.append(tool)
-            else:
-                raise ValueError(f"tool type {tool.type} not supported")
+
         if function_tools:
+            # get_developer_message вызывается только для Harmony,
+            # поэтому мы можем напрямую использовать DeveloperContent
+            # для форматирования.
             function_tool_descriptions = [
                 create_tool_definition(tool) for tool in function_tools
             ]
+            # Этот метод правильно отформатирует инструменты
             dev_msg_content = dev_msg_content.with_function_tools(
                 function_tool_descriptions
             )
+
+    if response_schema:
+        # Форматируем схему ответа согласно документации Harmony
+        schema_name = response_schema.get("name", "response_format")
+        schema_description = response_schema.get("description", "The required response format.")
+        # Саму схему передаем как JSON-строку
+        schema_body = json.dumps(response_schema.get("schema", {}), ensure_ascii=False)
+
+        format_str = (
+            f"# Response Formats\n\n"
+            f"## {schema_name}\n\n"
+            f"// {schema_description}\n"
+            f"{schema_body}"
+        )
+        parts.append(format_str)
+
+    # Объединяем инструкции и формат ответа, если они есть.
+    # Инструменты уже добавлены в dev_msg_content.
+    if parts:
+        # Если инструкции уже были, добавляем формат ответа через разделитель.
+        # Если инструкций не было, dev_msg_content.instructions пуст.
+        existing_instructions = dev_msg_content.instructions or ""
+        all_instructions = existing_instructions + "\n\n" + "\n\n".join(parts)
+        dev_msg_content = dev_msg_content.with_instructions(all_instructions.strip())
     dev_msg = Message.from_role_and_content(Role.DEVELOPER, dev_msg_content)
     return dev_msg
 

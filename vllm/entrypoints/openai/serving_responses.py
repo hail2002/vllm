@@ -997,12 +997,21 @@ class OpenAIServingResponses(OpenAIServing):
                 request, with_custom_tools, tool_types
             )
             messages.append(sys_msg)
-            # Создаем developer message, если есть инструкции ИЛИ кастомные инструменты.
-            # `request.tools` передаем в любом случае,
-            # get_developer_message сам отфильтрует ненужные.
-            if with_custom_tools or request.instructions:
+            if with_custom_tools or request.instructions or request.text:
+                # Извлекаем схему ответа
+                response_schema = None
+                if (
+                    request.text and request.text.format and
+                    request.text.format.type == "json_schema"
+                ):
+                    response_schema = request.text.format.model_dump(
+                        by_alias=True, exclude_none=True
+                    )
+
                 dev_msg = get_developer_message(
-                    instructions=request.instructions, tools=request.tools
+                    instructions=request.instructions,
+                    tools=request.tools,
+                    response_schema=response_schema
                 )
                 messages.append(dev_msg)
             messages += construct_harmony_previous_input_messages(request)
