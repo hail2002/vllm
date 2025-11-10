@@ -224,8 +224,8 @@ def parse_response_input(
         else:
             contents = [TextContent(text=text_prefix + c["text"]) for c in content]
             msg = Message.from_role_and_contents(role, contents)
-        if role == "assistant":
-            msg = msg.with_channel("final")
+        # if role == "assistant":
+        #     msg = msg.with_channel("final")
     elif response_msg["type"] == "function_call_output":
         call_id = response_msg["call_id"]
         call_response: ResponseFunctionToolCall | None = None
