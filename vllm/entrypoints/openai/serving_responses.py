@@ -997,7 +997,10 @@ class OpenAIServingResponses(OpenAIServing):
                 request, with_custom_tools, tool_types
             )
             messages.append(sys_msg)
-            if with_custom_tools:
+            # Создаем developer message, если есть инструкции ИЛИ кастомные инструменты.
+            # `request.tools` передаем в любом случае,
+            # get_developer_message сам отфильтрует ненужные.
+            if with_custom_tools or request.instructions:
                 dev_msg = get_developer_message(
                     instructions=request.instructions, tools=request.tools
                 )
